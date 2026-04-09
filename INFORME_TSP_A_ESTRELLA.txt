@@ -1,0 +1,431 @@
+================================================================================
+        INFORME TÉCNICO — PROBLEMA DEL VIAJERO (TSP)
+        SOLUCIÓN CON ALGORITMO DE BÚSQUEDA INFORMADA A*
+        Aplicación Android en Kotlin
+================================================================================
+
+------------------------------------------------------------------------
+1. MODELADO DEL ESTADO
+------------------------------------------------------------------------
+
+1.1 DESCRIPCIÓN DEL PROBLEMA
+------------------------------
+El Problema del Viajero (Traveling Salesman Problem, TSP) consiste en
+encontrar el circuito de mínimo costo total que, partiendo de una ciudad
+de origen, visite exactamente una vez cada ciudad del conjunto y regrese
+al punto de partida. Es un problema de optimización combinatoria
+NP-difícil, lo que significa que su complejidad crece factorialmente con
+el número de ciudades.
+
+En este proyecto se resuelve una versión acotada del TSP para entre 2 y
+8 ciudades, utilizando el algoritmo de búsqueda informada A*.
+
+
+1.2 ¿QUÉ ES UN ESTADO?
+------------------------
+Un estado representa la situación completa del viajero en un momento
+específico de la búsqueda. Para que la búsqueda sea correcta, el estado
+debe contener toda la información necesaria para determinar qué acciones
+son posibles desde ese punto.
+
+En este problema, un estado queda definido completamente por:
+
+   a) La ciudad actual donde se encuentra el viajero.
+   b) El conjunto de ciudades ya visitadas hasta ese momento.
+
+Con estos dos datos podemos responder: ¿a dónde puede ir el viajero?
+(cualquier ciudad no visitada) y ¿cuánto ha costado llegar aquí?
+
+
+1.3 REPRESENTACIÓN DEL ESTADO EN EL CÓDIGO
+--------------------------------------------
+El estado no se implementa como una clase separada. Está representado
+por dos valores numéricos que forman parte de cada nodo del árbol de
+búsqueda:
+
+   · currentCity (Int): índice entero de la ciudad actual (0 a N-1).
+
+   · visitedMask (Int): número entero usado como MÁSCARA DE BITS.
+     Cada bit en la posición i vale 1 si la ciudad i fue visitada, y 0
+     si aún no ha sido recorrida.
+
+Ejemplo con 5 ciudades (índices 0 a 4):
+   - Viajero en ciudad 2, habiendo visitado ciudades 0, 1 y 2:
+     currentCity = 2
+     visitedMask = 00111 en binario = 7 en decimal
+
+Operaciones sobre la máscara de bits:
+   - Verificar si ciudad i fue visitada: (visitedMask and (1 shl i)) != 0
+   - Marcar ciudad i como visitada:     visitedMask or (1 shl i)
+   - Estado objetivo (todas visitadas): (1 shl n) - 1
+
+
+1.4 ESTRUCTURAS DE DATOS DEL ESTADO
+-------------------------------------
+Las siguientes estructuras almacenan la información global del problema:
+
+   a) citiesList: MutableList<City>
+      Lista de objetos City que guarda el nombre y el ID de cada ciudad
+      ingresada por el usuario. City es un data class con dos campos:
+         · name (String): nombre de la ciudad
+         · id (Int): índice de la ciudad (0 a N-1)
+
+   b) distanceMatrix: Array<DoubleArray>
+      Matriz bidimensional simétrica de tamaño N×N que almacena las
+      distancias en kilómetros entre cada par de ciudades i y j.
+      · distanceMatrix[i][j] es la distancia de la ciudad i a la ciudad j.
+      · Es simétrica: distanceMatrix[i][j] == distanceMatrix[j][i].
+      · Se inicializa vacía y se rellena con los datos del usuario.
+
+   c) minCostToState: MutableMap<Pair<Int,Int>, Double>
+      Mapa de memoización utilizado para la poda. Registra el menor
+      costo acumulado (g) conocido para cada par (ciudadActual, máscara).
+      Evita expandir caminos que ya sabemos que son subóptimos para
+      llegar al mismo estado.
+
+
+1.5 ESPACIO DE ESTADOS
+-----------------------
+   · Número total de estados posibles: N × 2^N
+   · Para 5 ciudades: 5 × 32  = 160  estados
+   · Para 6 ciudades: 6 × 64  = 384  estados
+   · Para 7 ciudades: 7 × 128 = 896  estados
+   · Para 8 ciudades: 8 × 256 = 2048 estados
+
+El estado inicial es: ciudad 0, solo ciudad 0 visitada → (0, 0b00001).
+El estado objetivo es: cualquier ciudad, todas visitadas → (x, allVisited),
+seguido del retorno obligatorio a ciudad 0.
+
+
+------------------------------------------------------------------------
+2. REPRESENTACIÓN DEL NODO
+------------------------------------------------------------------------
+
+2.1 ¿QUÉ ES UN NODO EN EL ÁRBOL DE BÚSQUEDA?
+----------------------------------------------
+Un nodo representa un punto en el árbol de búsqueda. Contiene el estado
+del problema en ese instante, más información adicional que el algoritmo
+necesita para navegar el árbol, calcular costos y reconstruir la ruta
+óptima.
+
+La diferencia entre estado y nodo es fundamental:
+   · El ESTADO describe la situación del mundo (ciudad actual + visitadas).
+   · El NODO es una estructura del algoritmo que envuelve un estado y
+     añade datos como el costo acumulado, la heurística y el camino.
+
+
+2.2 CLASE Node — DEFINICIÓN
+-----------------------------
+Cada nodo del árbol de búsqueda se implementa como la siguiente
+data class en Kotlin:
+
+   data class Node(
+       val currentCity: Int,
+       val visitedMask: Int,
+       val g: Double,
+       val h: Double,
+       val path: List<Int>
+   ) : Comparable<Node> {
+       val f: Double get() = g + h
+       override fun compareTo(other: Node): Int = f.compareTo(other.f)
+   }
+
+Desglose de cada campo:
+
+   · currentCity (Int)
+     Índice de la ciudad donde se encuentra el viajero en este nodo.
+     Rango: 0 hasta N-1.
+
+   · visitedMask (Int)
+     Bitmask que codifica el conjunto de ciudades ya visitadas en este
+     punto del árbol. Junto con currentCity, define el estado del nodo.
+
+   · g (Double)
+     Costo acumulado real desde el nodo raíz hasta este nodo.
+     Es la suma de las distancias reales recorridas.
+     g(raíz) = 0.0
+
+   · h (Double)
+     Valor heurístico — estimación del costo mínimo restante para
+     completar el tour desde este nodo y regresar al origen.
+     Lo calcula la función estimateH().
+
+   · f (Double) — propiedad calculada
+     f = g + h
+     Es el criterio de prioridad del algoritmo A*. El nodo con menor f
+     se expande primero. Se implementa como propiedad calculada (val f).
+
+   · path (List<Int>)
+     Lista ordenada de los índices de ciudades recorridas desde el origen
+     hasta este nodo. Permite reconstruir la ruta al llegar a la meta.
+     path del nodo raíz = [0]
+     path de un nodo en nivel 3 = [0, 2, 1, 3]
+
+
+2.3 COMPARABLE<NODE> — ORDEN EN LA COLA DE PRIORIDAD
+------------------------------------------------------
+La clase Node implementa Comparable<Node>. La comparación se basa en
+el valor f:
+
+   override fun compareTo(other: Node): Int = f.compareTo(other.f)
+
+Esto permite que la PriorityQueue<Node> de Java funcione como un
+min-heap: siempre extrae el nodo con el menor valor f, que es el nodo
+más prometedor según el criterio de A*.
+
+
+2.4 RELACIÓN ENTRE NODOS (ÁRBOL DE BÚSQUEDA)
+---------------------------------------------
+Los nodos no guardan una referencia explícita al nodo padre. En lugar
+de eso, cada nodo acumula una copia inmutable del campo path, que
+registra toda la secuencia de ciudades visitadas. Esto es suficiente
+para reconstruir la ruta completa al alcanzar el nodo meta.
+
+Estructura del árbol (ejemplo con 3 ciudades: 0, 1, 2):
+
+   Nivel 0 (raíz):
+     Node(currentCity=0, mask=001, g=0.0, path=[0])
+
+   Nivel 1 (sucesores de ciudad 0):
+     Node(currentCity=1, mask=011, g=d01, path=[0,1])
+     Node(currentCity=2, mask=101, g=d02, path=[0,2])
+
+   Nivel 2:
+     Node(currentCity=2, mask=111, g=d01+d12, path=[0,1,2])  ← meta
+     Node(currentCity=1, mask=111, g=d02+d21, path=[0,2,1])  ← meta
+
+   Nodo solución (tras retorno al origen):
+     Node(currentCity=0, mask=111, g=d01+d12+d20, path=[0,1,2,0])
+
+
+2.5 NODO INICIAL
+-----------------
+   Node(
+       currentCity = 0,
+       visitedMask = 1,        // solo ciudad 0 visitada: bit 0 = 1
+       g           = 0.0,
+       h           = estimateH(0, 1),
+       path        = listOf(0)
+   )
+
+
+2.6 NODO META
+--------------
+Un nodo alcanza el estado meta cuando visitedMask == allVisited
+(todas las ciudades han sido visitadas). Al detectarlo, se añade
+el retorno obligatorio a ciudad 0:
+
+   val finalG = current.g + distanceMatrix[current.currentCity][0]
+   return Node(0, allVisited, finalG, 0.0, current.path + 0)
+
+
+------------------------------------------------------------------------
+3. ALGORITMO A* — LÓGICA COMPLETA
+------------------------------------------------------------------------
+
+3.1 DESCRIPCIÓN
+----------------
+A* es un algoritmo de búsqueda informada que combina:
+   · La búsqueda de costo uniforme (garantía de optimalidad por g).
+   · Una heurística admisible (guía eficiente por h).
+
+Expande siempre el nodo con menor f = g + h, lo que le permite
+encontrar la solución óptima explorando el menor número posible de nodos.
+
+
+3.2 MÉTODO runAStar() — IMPLEMENTACIÓN
+----------------------------------------
+Ubicación: MainActivity.kt, línea 192.
+
+PSEUDOCÓDIGO:
+
+   función runAStar():
+     n ← número de ciudades
+     allVisited ← (1 shl n) - 1
+     pq ← PriorityQueue<Node>()        // min-heap por f
+     minCostToState ← mapa vacío
+
+     nodoInicial ← Node(0, 1, 0.0, h(0,1), [0])
+     pq.agregar(nodoInicial)
+     generatedNodes++
+
+     mientras pq no esté vacía:
+       actual ← pq.extraer()            // nodo con menor f
+       expandedNodes++
+
+       estado ← (actual.currentCity, actual.visitedMask)
+       si minCostToState[estado] existe Y < actual.g:
+         prunedNodes++
+         continuar                      // poda: camino dominado
+
+       minCostToState[estado] ← actual.g
+
+       si actual.visitedMask == allVisited:
+         finalG ← actual.g + distancia[actual.currentCity][0]
+         devolver Node(0, allVisited, finalG, 0.0, actual.path + 0)
+
+       para cada ciudad next de 0 hasta n-1:
+         si ciudad next NO fue visitada:
+           newG ← actual.g + distancia[actual.currentCity][next]
+           nuevoNodo ← Node(next, máscara|next, newG, h(next,máscara|next), path+next)
+           pq.agregar(nuevoNodo)
+           generatedNodes++
+
+     devolver null
+
+
+3.3 FUNCIÓN HEURÍSTICA estimateH()
+------------------------------------
+Ubicación: MainActivity.kt, línea 243.
+
+La heurística calcula la DISTANCIA MÍNIMA a cualquier ciudad no visitada
+desde la ciudad actual:
+
+   función estimateH(current, mask):
+     minToUnvisited ← ∞
+     anyUnvisited ← falso
+
+     para cada ciudad i de 0 hasta n-1:
+       si ciudad i NO fue visitada (bit i de mask = 0):
+         anyUnvisited ← verdadero
+         si distancia[current][i] < minToUnvisited:
+           minToUnvisited ← distancia[current][i]
+
+     si anyUnvisited: h ← minToUnvisited
+     sino: h ← 0.0
+     devolver h
+
+PROPIEDADES:
+   · Admisible: nunca sobreestima el costo real restante.
+     En el mejor caso, el viajero solo recorre la distancia mínima
+     a una ciudad no visitada. El costo real siempre es ≥ a eso.
+   · Consistente (monotónica): h(n) ≤ c(n,n') + h(n').
+   · Garantía de optimalidad: A* con heurística admisible siempre
+     encuentra la solución de menor costo total.
+
+
+------------------------------------------------------------------------
+4. ESTADÍSTICAS DEL ALGORITMO
+------------------------------------------------------------------------
+
+Durante la ejecución se contabilizan tres métricas educativas:
+
+   · generatedNodes (Nodos Generados):
+     Incrementado cada vez que un nuevo nodo es creado y añadido a la
+     cola de prioridad. Representa la amplitud de la exploración.
+
+   · expandedNodes (Nodos Expandidos):
+     Incrementado cada vez que un nodo es extraído de la cola para
+     ser procesado. Representa el trabajo efectivo del algoritmo.
+
+   · prunedNodes (Nodos Podados):
+     Incrementado cuando un nodo es descartado porque existe un camino
+     de menor costo g al mismo estado (ciudadActual, visitedMask).
+
+Relación esperada: generatedNodes ≥ expandedNodes + prunedNodes.
+
+La poda reduce significativamente el trabajo: para 8 ciudades, el número
+de nodos expandidos suele ser una fracción del espacio total de 2048 estados.
+
+
+------------------------------------------------------------------------
+5. INTERFAZ DE USUARIO — FLUJO DE 3 PASOS
+------------------------------------------------------------------------
+
+Paso 1 — Configuración de ciudades:
+   · El usuario ingresa nombres de ciudades (máximo 8).
+   · Cada ciudad se muestra como un Chip eliminable.
+   · Al presionar SIGUIENTE se activa el Paso 2.
+   · Método: addCity(name), showStep2()
+
+Paso 2 — Ingreso de distancias:
+   · Se generan dinámicamente campos de texto para cada par (i,j).
+   · El usuario ingresa las distancias en kilómetros.
+   · Al presionar RESOLVER se ejecuta el algoritmo A*.
+   · Métodos: captureDistances(), solveAndShowResults()
+
+Paso 3 — Resultados:
+   · Grafo visual del circuito óptimo (Bitmap 1000×1000 px).
+   · Ruta óptima en formato "Ciudad A → Ciudad B → ... → Ciudad A".
+   · Distancia total en km.
+   · Estadísticas del algoritmo (nodos expandidos, generados, podados).
+   · Método: drawGraph(path)
+
+
+------------------------------------------------------------------------
+6. VISUALIZACIÓN DEL GRAFO
+------------------------------------------------------------------------
+
+El grafo se dibuja con la API Canvas de Android sobre un Bitmap.
+
+   · Tamaño del bitmap: 1000 × 1000 px.
+   · Las ciudades se distribuyen en una circunferencia de radio 350 px.
+   · Ángulo por ciudad: (i × 360 / n) - 90 grados.
+   · Ciudad origen (índice 0): círculo rojo (#D32F2F).
+   · Resto de ciudades: círculo verde azulado (#00796B).
+   · Aristas del circuito: líneas azules (#1976D2), grosor 5 px.
+   · Distancias: etiquetas en texto gris oscuro sobre cada arista.
+
+
+------------------------------------------------------------------------
+7. RESUMEN DE CLASES Y MÉTODOS
+------------------------------------------------------------------------
+
+CLASE: City (data class, línea 22)
+   Campos:
+     · name: String — nombre de la ciudad
+     · id: Int      — índice de la ciudad en la lista
+
+CLASE: Node (data class, línea 24)
+   Campos:
+     · currentCity: Int   — ciudad actual
+     · visitedMask: Int   — bitmask de ciudades visitadas
+     · g: Double          — costo acumulado real
+     · h: Double          — valor heurístico
+     · f: Double          — g + h (propiedad calculada)
+     · path: List<Int>    — historial de ciudades visitadas
+   Implementa: Comparable<Node> (ordenado por f)
+
+CLASE: MainActivity (AppCompatActivity, línea 19)
+   Atributos globales:
+     · citiesList: MutableList<City>
+     · distanceMatrix: Array<DoubleArray>
+     · expandedNodes: Int
+     · generatedNodes: Int
+     · prunedNodes: Int
+   Métodos de ciclo de vida:
+     · onCreate() — punto de entrada, llama a setupUI()
+   Métodos de UI:
+     · setupUI()              — enlaza vistas y listeners
+     · addCity(name)          — agrega ciudad a lista y muestra Chip
+     · showStep2()            — transición al paso 2, genera inputs
+     · captureDistances()     — lee distancias y llena la matriz
+     · solveAndShowResults()  — ejecuta A* y muestra resultados
+     · resetAll()             — limpia todo y vuelve al paso 1
+   Métodos del algoritmo:
+     · runAStar(): Node?      — implementación completa del algoritmo A*
+     · estimateH(current, mask): Double — función heurística admisible
+   Métodos de visualización:
+     · drawGraph(path)        — dibuja el grafo óptimo en Canvas/Bitmap
+
+
+------------------------------------------------------------------------
+8. COMPLEJIDAD DEL ALGORITMO
+------------------------------------------------------------------------
+
+   Espacial:
+     · O(N × 2^N) estados posibles en el mapa de memoización.
+     · O(2^N) nodos en la cola de prioridad en el peor caso.
+
+   Temporal:
+     · Peor caso sin poda: O(N!) — explora todas las permutaciones.
+     · Con poda A*: significativamente mejor en la práctica.
+     · Para 8 ciudades: máximo 2048 estados en el mapa de memoización.
+
+   La heurística admisible garantiza que A* es:
+     · COMPLETO: siempre encuentra solución si existe.
+     · ÓPTIMO:   la primera solución encontrada es de costo mínimo.
+
+================================================================================
+        FIN DEL INFORME TÉCNICO
+================================================================================
